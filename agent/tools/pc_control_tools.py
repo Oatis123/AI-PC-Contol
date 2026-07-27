@@ -3,12 +3,21 @@ import winreg
 import shlex
 import psutil
 import time
+import ctypes
+import logging
 from typing import List, Dict, Any, Union, Optional
 
 from langchain_core.tools import tool
+
+_SOFTWARE_CACHE = None
+_SOFTWARE_CACHE_TIME = 0
+_MODERN_APPS_CACHE = {}
+_CLASSIC_APP_PATHS_CACHE = None
+_CLASSIC_APP_PATHS_CACHE_TIME = 0
 from pywinauto import Desktop
 from pywinauto.application import Application
 from pywinauto.findwindows import ElementNotFoundError
+from PIL import ImageGrab
 
 import pyautogui
 
@@ -16,6 +25,10 @@ ELEMENTS_CACHE = {}
 CURRENT_ID = 0
 
 def _get_installed_software():
+    global _SOFTWARE_CACHE, _SOFTWARE_CACHE_TIME, _MODERN_APPS_CACHE
+    if _SOFTWARE_CACHE is not None and (time.time() - _SOFTWARE_CACHE_TIME < 300):
+        return _SOFTWARE_CACHE
+
     all_apps = set()
 
     command_classic = r'''
@@ -32,12 +45,16 @@ def _get_installed_software():
         classic_apps = {line.strip() for line in result_classic.stdout.splitlines() if line.strip()}
         all_apps.update(classic_apps)
 
-    command_modern = r'Get-AppxPackage | Select-Object -ExpandProperty Name'
+    command_modern = r'Get-AppxPackage | ForEach-Object { "$($_.Name)|$($_.PackageFamilyName)" }'
     result_modern = subprocess.run(["powershell", "-Command", command_modern], capture_output=True, text=True, encoding='utf-8', errors='ignore')
     
     if result_modern.returncode == 0:
-        modern_apps = {line.strip() for line in result_modern.stdout.splitlines() if line.strip()}
-        all_apps.update(modern_apps)
+        for line in result_modern.stdout.splitlines():
+            line = line.strip()
+            if '|' in line:
+                name, pfn = line.split('|', 1)
+                _MODERN_APPS_CACHE[name.lower()] = pfn
+                all_apps.add(name)
 
     full_list = sorted(list(all_apps))
     
@@ -55,6 +72,8 @@ def _get_installed_software():
         if not any(stop_word.lower() in app.lower() for stop_word in stop_words)
     ]
     
+    _SOFTWARE_CACHE = filtered_list
+    _SOFTWARE_CACHE_TIME = time.time()
     return filtered_list
 
 
@@ -84,6 +103,10 @@ def find_application_name(approximate_name: str) -> str:
 
 
 def _get_classic_app_paths():
+    global _CLASSIC_APP_PATHS_CACHE, _CLASSIC_APP_PATHS_CACHE_TIME
+    if _CLASSIC_APP_PATHS_CACHE is not None and (time.time() - _CLASSIC_APP_PATHS_CACHE_TIME < 300):
+        return _CLASSIC_APP_PATHS_CACHE
+
     app_paths = {}
     registry_paths = [
         r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
@@ -121,6 +144,8 @@ def _get_classic_app_paths():
                             app_paths[display_name.lower()] = executable_path
             except FileNotFoundError:
                 pass
+    _CLASSIC_APP_PATHS_CACHE = app_paths
+    _CLASSIC_APP_PATHS_CACHE_TIME = time.time()
     return app_paths
 
 
@@ -138,11 +163,17 @@ def _start_application_by_name(app_name: str) -> bool:
         print(f"Ошибка при поиске в реестре: {e}")
 
     try:
-        command = f'Get-AppxPackage | Where-Object {{$_.Name -like "*{app_name}*"}} | Select-Object -First 1 -ExpandProperty PackageFamilyName'
-        result = subprocess.run(["powershell", "-Command", command], capture_output=True, text=True, encoding='utf-8', errors='ignore')
-        if result.returncode == 0 and result.stdout.strip():
-            package_family_name = result.stdout.strip()
-            launch_command = f'explorer.exe shell:appsFolder\\{package_family_name}!App'
+        if not _MODERN_APPS_CACHE:
+            _get_installed_software()
+            
+        found_pfn = None
+        for name, pfn in _MODERN_APPS_CACHE.items():
+            if app_name_lower in name:
+                found_pfn = pfn
+                break
+                
+        if found_pfn:
+            launch_command = f'explorer.exe shell:appsFolder\\{found_pfn}!App'
             subprocess.Popen(launch_command, shell=True)
             time.sleep(2.0)
             return True
@@ -170,9 +201,25 @@ def start_application(app_name: str)->bool:
 @tool
 def get_open_windows():
     """Возвращает список заголовков всех открытых окон."""
-    desktop = Desktop(backend="uia")
-    windows = desktop.windows()
-    window_titles = [win.window_text() for win in windows if win.window_text()]
+    EnumWindows = ctypes.windll.user32.EnumWindows
+    EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
+    GetWindowText = ctypes.windll.user32.GetWindowTextW
+    GetWindowTextLength = ctypes.windll.user32.GetWindowTextLengthW
+    IsWindowVisible = ctypes.windll.user32.IsWindowVisible
+    
+    window_titles = []
+    def foreach_window(hwnd, lParam):
+        if IsWindowVisible(hwnd):
+            length = GetWindowTextLength(hwnd)
+            if length > 0:
+                buff = ctypes.create_unicode_buffer(length + 1)
+                GetWindowText(hwnd, buff, length + 1)
+                title = buff.value
+                if title:
+                    window_titles.append(title)
+        return True
+        
+    EnumWindows(EnumWindowsProc(foreach_window), 0)
     
     if not window_titles:
         return "не найдено открытых окон"
@@ -182,101 +229,98 @@ def get_open_windows():
 @tool
 def scrape_application(name: str) -> str:
     """
-    Сканирует окно приложения и возвращает иерархическое (XML-подобное) представление 
-    всех видимых интерактивных элементов. 
-    
-    Каждому активному элементу (кнопки, поля ввода и т.д.) присваивается уникальный числовой 'id'.
-    Контейнеры (панели, группы) выводятся без id для понимания структуры окна.
-    Используй полученные 'id' для инструментов взаимодействия.
+    Сканирует окно приложения с помощью визуального нейросетевого парсера OmniParser.
+    Делает скриншот окна приложения, детектует активные элементы (кнопки, иконки, поля ввода, текст)
+    и присваивает каждому элементу уникальный 'id' для взаимодействия.
 
     Args:
         name (str): Часть заголовка окна для поиска.
-        control_types (Optional[List[str]]): Список типов для фильтрации (необязательно).
     """
+    start_time = time.time()
     global ELEMENTS_CACHE, CURRENT_ID
     ELEMENTS_CACHE.clear()
     CURRENT_ID = 0
-    
+
+    logging.info(f"🔍 [OmniParser] Поиск окна для скрапинга: '{name}'...")
+
     try:
         app_name = name.split(" - ")[-1].strip() if " - " in name else name.strip()
         
-        desktop = Desktop(backend="uia")
-        main_win_spec = desktop.window(title_re=f".*{app_name}.*", found_index=0)
-
-        if not main_win_spec.exists(timeout=5):
-            return f"Ошибка: Окно с именем, содержащим '{name}', не найдено."
+        main_win_spec = Desktop(backend="win32").window(title_re=f".*{app_name}.*", found_index=0)
+        if not main_win_spec.exists(timeout=0.5):
+            main_win_spec = Desktop(backend="uia").window(title_re=f".*{app_name}.*", found_index=0)
+            if not main_win_spec.exists(timeout=0.5):
+                elapsed = time.time() - start_time
+                logging.info(f"❌ [OmniParser] Окно '{name}' не найдено ({elapsed:.4f} сек).")
+                return f"Ошибка: Окно с именем, содержащим '{name}', не найдено."
 
         main_win = main_win_spec.wrapper_object()
 
         if not main_win.is_active():
-            main_win.set_focus()
-            main_win_spec.wait('active', timeout=5)
-
-        container_types = {'Pane', 'Group', 'Window', 'ToolBar', 'MenuBar', 'ScrollBar', 'Image', 'Custom'}
-
-        def build_xml_tree(element, indent=0) -> str:
-            global CURRENT_ID, ELEMENTS_CACHE
+            logging.info(f"↗️ [OmniParser] Фокусировка на окне '{app_name}'...")
             try:
-                if not element.is_visible():
-                    return ""
+                main_win.set_focus()
             except Exception:
-                return ""
+                pass
 
-            control_type = element.element_info.control_type
-            name_prop = element.element_info.name or ""
-            
-            children_xml = ""
-            for child in element.children():
-                children_xml += build_xml_tree(child, indent + 1)
+        rect = main_win.rectangle()
+        if rect.width() <= 0 or rect.height() <= 0:
+            logging.warning(f"⚠️ [OmniParser] Окно '{app_name}' имеет нулевой размер {rect}.")
+            return "Ошибка: Окно имеет нулевой размер или свернуто."
 
-            is_interactive = control_type not in container_types and element.is_enabled()
-            
-            if not is_interactive and not children_xml.strip():
-                return ""
+        # Capture window screenshot
+        bbox = (rect.left, rect.top, rect.right, rect.bottom)
+        logging.info(f"📸 [OmniParser] Захват скриншота области окна: X={rect.left}, Y={rect.top}, W={rect.width()}, H={rect.height()}...")
+        img = ImageGrab.grab(bbox=bbox)
 
-            tag_name = control_type.replace("Control", "")
-            attrs = []
-            
-            if name_prop:
-                safe_name = name_prop.replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
-                attrs.append(f'name="{safe_name}"')
-                
-            if is_interactive:
-                element_id = CURRENT_ID
-                attrs.append(f'id="{element_id}"')
-                
-                rect = element.rectangle()
-                ELEMENTS_CACHE[element_id] = {
-                    "left": rect.left, "top": rect.top,
-                    "right": rect.right, "bottom": rect.bottom
-                }
-                CURRENT_ID += 1
-                
-            attr_string = " ".join(attrs)
-            prefix = "  " * indent
-            
-            if children_xml:
-                if attr_string:
-                    return f"{prefix}<{tag_name} {attr_string}>\n{children_xml}{prefix}</{tag_name}>\n"
-                else:
-                    return f"{prefix}<{tag_name}>\n{children_xml}{prefix}</{tag_name}>\n"
-            else:
-                if attr_string:
-                    return f"{prefix}<{tag_name} {attr_string}/>\n"
-                else:
-                    return f"{prefix}<{tag_name}/>\n"
+        # Parse screenshot with OmniParser engine
+        logging.info(f"🧠 [OmniParser] Запуск распознавания элементов (YOLO + OCR)...")
+        from agent.vision.omniparser_engine import OmniParserEngine
+        engine = OmniParserEngine()
+        elements = engine.parse_image(img)
 
-        xml_output = build_xml_tree(main_win)
-        
-        if not xml_output.strip():
-            return "Окно найдено, но в нем нет видимых интерактивных элементов."
-            
+        if not elements:
+            logging.warning(f"⚠️ [OmniParser] Элементы не найдены на скриншоте '{app_name}'.")
+            return "OmniParser не обнаружил интерактивных элементов на скриншоте окна."
+
+        xml_lines = ["<WindowVision>"]
+        for elem in elements:
+            elem_id = CURRENT_ID
+            # Map window-relative coordinates to absolute screen coordinates
+            abs_left = rect.left + elem["left"]
+            abs_top = rect.top + elem["top"]
+            abs_right = rect.left + elem["right"]
+            abs_bottom = rect.top + elem["bottom"]
+
+            ELEMENTS_CACHE[elem_id] = {
+                "left": abs_left, "top": abs_top,
+                "right": abs_right, "bottom": abs_bottom,
+                "name": elem["name"],
+                "control_type": elem["control_type"]
+            }
+            CURRENT_ID += 1
+
+            safe_name = elem["name"].replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
+            tag = elem["control_type"].replace("/", "_")
+            # Include spatial coordinates hint so LLM understands layout (row/column position)
+            rel_cx = (elem["left"] + elem["right"]) // 2
+            rel_cy = (elem["top"] + elem["bottom"]) // 2
+            xml_lines.append(f'  <{tag} id="{elem_id}" name="{safe_name}" pos="x:{rel_cx},y:{rel_cy}" />')
+
+        xml_lines.append("</WindowVision>")
+        xml_output = "\n".join(xml_lines)
+
+        elapsed = time.time() - start_time
+        logging.info(f"⏱️ [OmniParser] Окно '{name}' успешно распознано за {elapsed:.4f} сек. Найдено {CURRENT_ID} элементов!")
         return xml_output
 
     except ElementNotFoundError:
+        elapsed = time.time() - start_time
+        logging.info(f"❌ [OmniParser] Окно '{name}' не найдено ({elapsed:.4f} сек).")
         return f"Произошла ошибка: Окно с именем '{name}' не найдено после ожидания."
     except Exception as e:
-        return f"Произошла непредвиденная ошибка при работе с '{name}': {type(e).__name__}: {e}"
+        logging.error(f"💥 [OmniParser] Ошибка при сканировании окна '{name}': {e}", exc_info=True)
+        return f"Произошла ошибка скрапинга OmniParser: {e}"
     
 
 @tool
@@ -306,55 +350,30 @@ def interact_with_element_by_id(
             - В случае ошибки — строка с описанием ошибки (например, "Ошибка: Элемент с координатами ... не найден.").
     """
     try:
-        app_name = name.split(" - ")[-1].strip() if " - " in name else name.strip()
+        if element_id not in ELEMENTS_CACHE and 'zoom' not in action and action not in ["type_text_blind", "press_enter"]:
+            return f"Ошибка: Элемент с id {element_id} не найден в кэше."
 
-        desktop = Desktop(backend="uia")
-        main_win_spec = desktop.window(title_re=f".*{app_name}.*", found_index=0)
-
-        if not main_win_spec.exists(timeout=5):
-            return f"Ошибка: Окно с именем '{name}' не найдено."
-
-        main_win = main_win_spec.wrapper_object()
-        
-        if not main_win.is_active():
-            main_win.set_focus()
-            main_win_spec.wait('active', timeout=5)
-
-        target_element = None
-        for element in main_win.descendants():
-            try:
-                if not element.is_visible():
-                    continue
-
-                elem_rect = element.rectangle()
-                if (elem_rect.left == ELEMENTS_CACHE[element_id]['left'] and
-                    elem_rect.top == ELEMENTS_CACHE[element_id]['top'] and
-                    elem_rect.right == ELEMENTS_CACHE[element_id]['right'] and
-                    elem_rect.bottom == ELEMENTS_CACHE[element_id]['bottom']):
-                    
-                    target_element = element
-                    break
-            except Exception:
-                continue
-
-        if not target_element:
-            if 'zoom' not in action:
-                return f"Ошибка: Элемент с id {ELEMENTS_CACHE[element_id]} не найден."
+        if element_id in ELEMENTS_CACHE:
+            el_data = ELEMENTS_CACHE[element_id]
+            center_x = (el_data['left'] + el_data['right']) // 2
+            center_y = (el_data['top'] + el_data['bottom']) // 2
+        else:
+            center_x, center_y = 0, 0
 
         action = action.lower()
         if action == 'click':
-            target_element.click_input()
+            pyautogui.click(center_x, center_y)
         elif action == 'double_click':
-            target_element.double_click_input()
+            pyautogui.doubleClick(center_x, center_y)
         elif action == 'right_click':
-            target_element.right_click_input()
+            pyautogui.rightClick(center_x, center_y)
         
         elif action == 'set_text':
             if text_to_set is None:
                 return "Ошибка: для действия 'set_text' необходимо передать аргумент 'text_to_set'."
             
             # 1. Кликаем по элементу — это выведет окно на передний план
-            target_element.click_input()
+            pyautogui.click(center_x, center_y)
             time.sleep(0.15)
 
             # 2. Определяем нужный язык и переключаем раскладку активного окна
@@ -399,16 +418,20 @@ def interact_with_element_by_id(
             main_win.type_keys('~')
             
         elif action == 'get_text':
-            return target_element.window_text()
+            return ELEMENTS_CACHE.get(element_id, {}).get("name", "")
 
         elif action == 'scroll_up':
-            target_element.scroll("up", "page")
+            pyautogui.moveTo(center_x, center_y)
+            pyautogui.scroll(500)
         elif action == 'scroll_down':
-            target_element.scroll("down", "page")
+            pyautogui.moveTo(center_x, center_y)
+            pyautogui.scroll(-500)
         elif action == 'scroll_left':
-            target_element.scroll("left", "page")
+            pyautogui.moveTo(center_x, center_y)
+            pyautogui.hscroll(-500)
         elif action == 'scroll_right':
-            target_element.scroll("right", "page")
+            pyautogui.moveTo(center_x, center_y)
+            pyautogui.hscroll(500)
 
         elif action == 'zoom_in':
             main_win.type_keys('^{PLUS}')

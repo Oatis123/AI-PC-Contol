@@ -1,4 +1,4 @@
-
+import time
 from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage, ToolMessage, AIMessage
 from langgraph.graph import StateGraph, END
 from agent.prompts.main_system_prompt import prompt
@@ -26,7 +26,7 @@ tools = [
          interact_with_window]
 
 tools_by_name = {tool.name: tool for tool in tools}
-model_with_tools = gemma4_26b_a4b.bind_tools(tools)
+model_with_tools = gemma4_31b.bind_tools(tools)
 
 
 logging.basicConfig(
@@ -46,7 +46,7 @@ class AgentState(TypedDict):
     last_search_web_id: str | None
 
  
-def agent_node(state):
+async def agent_node(state):
     logging.info("--- Вход в agent_node ---")
     # 1. Заглушка для пустого контента (чтобы Xiaomi не крашился)
     for msg in state["messages"]:
@@ -54,83 +54,69 @@ def agent_node(state):
             msg.content = "Вызываю инструменты..."
 
     logging.info(f"Количество сообщений в истории: {len(state['messages'])}")
-    response = model_with_tools.invoke(state["messages"])
-    logging.info(f"Ответ агента получен. Содержит tool_calls: {bool(getattr(response, 'tool_calls', None))}")
+    model_start_time = time.time()
+    
+    response = None
+    for attempt in range(3):
+        try:
+            response = await model_with_tools.ainvoke(state["messages"])
+            break
+        except Exception as e:
+            if "429" in str(e) or "TooManyRequests" in str(e) or "rate" in str(e).lower():
+                logging.warning(f"⚠️ [Rate Limit 429] OpenRouter лимит запросов. Ожидание 3 сек (попытка {attempt+1}/3)...")
+                await asyncio.sleep(3)
+            else:
+                raise e
+
+    if response is None:
+        raise RuntimeError("Ошибка OpenRouter: превышен лимит запросов (429). Попробуйте позже.")
+
+    elapsed = time.time() - model_start_time
+    logging.info(f"⏱️ [LLM TIME] Ответ модели получен за {elapsed:.4f} сек. Содержит tool_calls: {bool(getattr(response, 'tool_calls', None))}")
     
     # 2. КРИТИЧЕСКИ ВАЖНО: склеиваем старую историю с новым ответом!
     return {"messages": state["messages"] + [response]}
 
 
-def tool_node(state: AgentState) -> dict:
+async def tool_node(state: AgentState) -> dict:
     logging.info("--- Вход в tool_node ---")
     tools_to_hide = ["scrape_application", "get_installed_software", "get_screenshot_tool"]
     last_message = state["messages"][-1]
     
-    is_search_web_called_now = any(
-        tc["name"] == "search_web" for tc in last_message.tool_calls
-    )
-    
+    is_search_web_called_now = any(tc["name"] == "search_web" for tc in last_message.tool_calls)
     previous_search_web_id = state.get("last_search_web_id")
-
-    is_heavy_tool_called = any(
-        tc["name"] in tools_to_hide for tc in last_message.tool_calls
-    )
-
+    is_heavy_tool_called = any(tc["name"] in tools_to_hide for tc in last_message.tool_calls)
     should_clean_history = is_heavy_tool_called or (is_search_web_called_now and previous_search_web_id)
-    logging.info(f"Очистка истории необходима: {should_clean_history}")
-
+    
     previous_ids_to_hide = state.get("ids_to_hide", [])
     screenshot_ids_to_hide = state.get("screenshot_ids_to_hide", [])
+    
     cleaned_messages = []
-
     if should_clean_history:
         logging.info("Выполняется очистка контекста от тяжелых результатов...")
-        i = 0
-        while i < len(state["messages"]):
-            msg = state["messages"][i]
+        skip_next = False
+        for i, msg in enumerate(state["messages"]):
+            if skip_next:
+                skip_next = False
+                continue
             
             if isinstance(msg, ToolMessage):
-                should_hide = False
-                if msg.tool_call_id in previous_ids_to_hide:
-                    should_hide = True
-                
-                elif is_search_web_called_now and msg.tool_call_id == previous_search_web_id:
-                    should_hide = True
-
+                should_hide = msg.tool_call_id in previous_ids_to_hide or \
+                             (is_search_web_called_now and msg.tool_call_id == previous_search_web_id)
                 if should_hide:
-                    if "Ошибка" in msg.content or "ошибка" in msg.content:
-                        cleaned_messages.append(
-                            ToolMessage(
-                                content=msg.content,
-                                tool_call_id=msg.tool_call_id,
-                            )
-                        )
-                    else:
-                        cleaned_messages.append(
-                            ToolMessage(
-                                content="Результат выполнения предыдущего инструмента скрыт для экономии контекста.",
-                                tool_call_id=msg.tool_call_id,
-                            )
-                        )
+                    is_error = "Ошибка" in msg.content or "ошибка" in msg.content
+                    new_content = msg.content if is_error else "Результат выполнения предыдущего инструмента скрыт для экономии контекста."
+                    cleaned_messages.append(ToolMessage(content=new_content, tool_call_id=msg.tool_call_id))
                     
-                    if msg.tool_call_id in screenshot_ids_to_hide:
-                        if i + 1 < len(state["messages"]):
-                            next_msg = state["messages"][i + 1]
-                            if isinstance(next_msg, HumanMessage):
-                                content = next_msg.content
-                                if isinstance(content, list):
-                                    has_image = any(
-                                        isinstance(c, dict) and c.get("type") == "image_url"
-                                        for c in content
-                                    )
-                                    if has_image:
-                                        i += 1
+                    if msg.tool_call_id in screenshot_ids_to_hide and i + 1 < len(state["messages"]):
+                        next_msg = state["messages"][i + 1]
+                        if isinstance(next_msg, HumanMessage) and isinstance(next_msg.content, list):
+                            if any(isinstance(c, dict) and c.get("type") == "image_url" for c in next_msg.content):
+                                skip_next = True
                 else:
                     cleaned_messages.append(msg)
             else:
                  cleaned_messages.append(msg)
-            
-            i += 1
     else:
         cleaned_messages = state["messages"]
 
@@ -142,31 +128,38 @@ def tool_node(state: AgentState) -> dict:
     logging.info(f"Вызов инструментов: {[tc['name'] for tc in last_message.tool_calls]}")
     for tool_call in last_message.tool_calls:
         tool = tools_by_name[tool_call["name"]]
+        tool_start_time = time.time()
         logging.info(f"Выполнение инструмента: {tool_call['name']} с аргументами: {tool_call['args']}")
         
         if tool_call["name"] == "search_web":
             current_search_web_id = tool_call["id"]
 
-        if tool_call["name"] == "get_screenshot_tool":
-            screenshot = tool.invoke(tool_call["args"])
-            mime_type = screenshot["mime_type"]
-            screenshot_data = screenshot["screenshot_data"]
-            
-            human_message_content = [
-                {"type": "text", "text": "Вот запрошенный скриншот для анализа."},
-                {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{screenshot_data}"}}
-            ]
-            new_tool_results.append(HumanMessage(content=human_message_content))
-            
-            tool_confirmation = json.dumps({"status": "success", "message": "Image provided in a new message."})
-            new_tool_results.append(ToolMessage(content=tool_confirmation, tool_call_id=tool_call["id"]))
-            
-            current_screenshot_ids.append(tool_call["id"])
-        else:
-            observation = tool.invoke(tool_call["args"])
-            new_tool_results.append(
-                ToolMessage(content=str(observation), tool_call_id=tool_call["id"])
-            )
+        try:
+            if tool_call["name"] == "get_screenshot_tool":
+                screenshot = await tool.ainvoke(tool_call["args"])
+                elapsed = time.time() - tool_start_time
+                logging.info(f"⏱️ [TOOL TIME] Инструмент '{tool_call['name']}' выполнен за {elapsed:.4f} сек.")
+                mime_type = screenshot["mime_type"]
+                screenshot_data = screenshot["screenshot_data"]
+                
+                human_message_content = [
+                    {"type": "text", "text": "Вот запрошенный скриншот для анализа."},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{screenshot_data}"}}
+                ]
+                new_tool_results.append(HumanMessage(content=human_message_content))
+                
+                tool_confirmation = json.dumps({"status": "success", "message": "Image provided in a new message."})
+                new_tool_results.append(ToolMessage(content=tool_confirmation, tool_call_id=tool_call["id"]))
+                
+                current_screenshot_ids.append(tool_call["id"])
+            else:
+                observation = await tool.ainvoke(tool_call["args"])
+                elapsed = time.time() - tool_start_time
+                logging.info(f"⏱️ [TOOL TIME] Инструмент '{tool_call['name']}' выполнен за {elapsed:.4f} сек.")
+                new_tool_results.append(ToolMessage(content=str(observation), tool_call_id=tool_call["id"]))
+        except Exception as tool_err:
+            logging.error(f"Ошибка вызова инструмента {tool_call['name']}: {tool_err}")
+            new_tool_results.append(ToolMessage(content=f"Ошибка вызова инструмента: {tool_err}", tool_call_id=tool_call["id"]))
         
         if tool_call["name"] in tools_to_hide:
             current_ids_to_hide.append(tool_call["id"])
@@ -260,11 +253,13 @@ async def request_to_agent_async(req: List):
         raise e
     
 def request_to_agent_sync(req: List):
-    logging.info(f"Получен новый запрос: {req}")
+    logging.info(f"Получен новый запрос (sync): {req}")
+    import asyncio
     
-    input_data = {"messages": [SystemMessage(prompt)] + req}
+    req_messages = [HumanMessage(content=c) if isinstance(c, str) else c for c in req]
+    input_data = {"messages": [SystemMessage(prompt)] + req_messages}
     
-    response = graph.invoke(input=input_data, config=config)
+    response = asyncio.run(graph.ainvoke(input=input_data, config=config))
     
     logging.info(f"Ответ от агента: {response}")
     
