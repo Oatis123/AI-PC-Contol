@@ -53,7 +53,7 @@ async def _execute_pc_task_background(prompt_text: str):
         logging.info(f"--- [TASK START] Processing prompt: '{prompt_text}' ---")
         
         # 1. Send single background state update over WS
-        await datasama_client.send_background_update(f"Выполняется задача: {prompt_text}")
+        await datasama_client.send_background_update(f"Executing task: {prompt_text}")
 
         # 2. Execute local PC control agent
         messages = [HumanMessage(content=prompt_text)]
@@ -64,14 +64,14 @@ async def _execute_pc_task_background(prompt_text: str):
             # Extract last meaningful AIMessage text content
             from langchain_core.messages import AIMessage
             for msg in reversed(agent_response_messages):
-                if isinstance(msg, AIMessage) and msg.content and msg.content != "Вызываю инструменты...":
+                if isinstance(msg, AIMessage) and msg.content and msg.content != "Calling tools...":
                     final_content = msg.content
                     break
             if not final_content and agent_response_messages:
                 final_content = str(agent_response_messages[-1].content)
 
         if not final_content:
-            final_content = "Задача выполнена (нет текстового ответа от агента)."
+            final_content = "Task completed (no text response from agent)."
 
         logging.info(f"--- [TASK FINISHED] Sending tool_result to Data-Sama: '{final_content}' ---")
 
@@ -87,7 +87,7 @@ async def _execute_pc_task_background(prompt_text: str):
         await datasama_client.send_tool_result(
             tool_name="execute_pc_task",
             status="error",
-            output=f"Ошибка при выполнении задачи на ПК: {str(e)}"
+            output=f"Error executing task on PC: {str(e)}"
         )
 
 
@@ -98,14 +98,14 @@ class TaskRequest(BaseModel):
 
 @app.get("/")
 async def root():
-    """Информационный эндпоинт состояния сервера Atlas AI-PC-Control."""
+    """Server status endpoint for Atlas AI-PC-Control."""
     return {
         "name": "Atlas AI-PC-Control API",
         "status": "running",
         "endpoints": {
-            "POST /api/execute": "Выполнить задачу на ПК (синхронно или асинхронно)",
-            "POST /run": "Прямое выполнение списка команд (legacy)",
-            "POST /tools/run-pc-agent": "Интеграционный эндпоинт Data-Sama"
+            "POST /api/execute": "Execute PC task (synchronously or asynchronously)",
+            "POST /run": "Direct command list execution (legacy)",
+            "POST /tools/run-pc-agent": "Data-Sama integration endpoint"
         }
     }
 
@@ -113,16 +113,16 @@ async def root():
 @app.post("/api/execute")
 async def execute_user_task(data: TaskRequest, background_tasks: BackgroundTasks):
     """
-    Универсальный REST API эндпоинт для обычных пользователей.
+    Universal REST API endpoint for clients.
     
-    Принимает JSON:
+    Accepts JSON:
     {
-      "prompt": "Открой блокнот и напиши 'Привет'",
+      "prompt": "Open notepad and type Hello",
       "async_mode": false
     }
     """
     if not data.prompt or not data.prompt.strip():
-        return {"status": "error", "message": "Поле 'prompt' не может быть пустым."}
+        return {"status": "error", "message": "The 'prompt' field cannot be empty."}
 
     prompt_text = data.prompt.strip()
 
@@ -130,7 +130,7 @@ async def execute_user_task(data: TaskRequest, background_tasks: BackgroundTasks
         background_tasks.add_task(_execute_pc_task_background, prompt_text)
         return {
             "status": "queued",
-            "message": "Задача принята и выполняется в фоновом режиме.",
+            "message": "Task queued and executing in background.",
             "prompt": prompt_text
         }
 
@@ -143,14 +143,14 @@ async def execute_user_task(data: TaskRequest, background_tasks: BackgroundTasks
         if agent_response_messages:
             from langchain_core.messages import AIMessage
             for msg in reversed(agent_response_messages):
-                if isinstance(msg, AIMessage) and msg.content and msg.content != "Вызываю инструменты...":
+                if isinstance(msg, AIMessage) and msg.content and msg.content != "Calling tools...":
                     final_content = msg.content
                     break
             if not final_content and agent_response_messages:
                 final_content = str(agent_response_messages[-1].content)
 
         if not final_content:
-            final_content = "Задача успешно выполнена."
+            final_content = "Task executed successfully."
 
         return {
             "status": "success",
@@ -177,13 +177,13 @@ async def run_pc_agent(payload: dict, background_tasks: BackgroundTasks):
     if not isinstance(arguments, dict):
         arguments = {}
 
-    prompt_text = arguments.get("prompt") or payload.get("prompt") or "Запусти проверку системы"
+    prompt_text = arguments.get("prompt") or payload.get("prompt") or "Run system health check"
 
     # Dispatch background execution
     background_tasks.add_task(_execute_pc_task_background, prompt_text)
 
     # Immediately respond with 200 OK
-    return "Задача принята в обработку агентом ПК."
+    return "Task accepted for processing by PC agent."
 
 
 @app.post("/run")

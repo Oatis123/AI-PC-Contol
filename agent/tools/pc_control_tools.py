@@ -27,22 +27,22 @@ ELEMENTS_CACHE = {}
 CURRENT_ID = 0
 
 def _type_unicode_text(text: str):
-    """Надежный способ ввода юникодного текста (включая кириллицу) через буфер обмена."""
+    """Reliable method for entering Unicode text (including non-ASCII) via the system clipboard."""
     
     if '\n' in text:
         lines = text.split('\n')
         for i, line in enumerate(lines):
             if line:
                 pyperclip.copy(line)
-                time.sleep(0.1) # Ждем пока Windows положит текст в буфер
-                pyautogui.hotkey('shift', 'insert') # Вставляет независимо от раскладки
+                time.sleep(0.1) # Wait for Windows to update clipboard
+                pyautogui.hotkey('shift', 'insert') # Pastes layout-independently
                 time.sleep(0.05)
             if i < len(lines) - 1:
                 pyautogui.press('enter')
     else:
         pyperclip.copy(text)
-        time.sleep(0.1) # Ждем пока Windows положит текст в буфер
-        pyautogui.hotkey('shift', 'insert') # Вставляет независимо от раскладки
+        time.sleep(0.1) # Wait for Windows to update clipboard
+        pyautogui.hotkey('shift', 'insert') # Pastes layout-independently
         time.sleep(0.05)
 
 def _get_installed_software():
@@ -100,29 +100,29 @@ def _get_installed_software():
 
 @tool
 def get_installed_software():
-    """Возвращает отфильтрованный список установленных программ, исключая системные компоненты. Не принимает аргументов."""
+    """Returns a filtered list of installed software, excluding system components. Takes no arguments."""
     return _get_installed_software()
 
 
 @tool
 def find_application_name(approximate_name: str) -> str:
     """
-    Находит точное название установленного приложения по его примерному названию.
+    Finds exact names of installed applications by an approximate query string.
 
     Args:
-        approximate_name (str): Приблизительное имя приложения для поиска (например, "chrome").
+        approximate_name (str): Approximate name of the application to search for (e.g. "chrome").
     """
     all_apps = _get_installed_software()
     
     search_term = approximate_name.lower()
     
-    # Собираем все частичные совпадения
+    # Collect all partial matches
     matches = [app for app in all_apps if search_term in app.lower()]
     
     if matches:
-        return "Найдены следующие приложения:\n" + "\n".join(f"- {app}" for app in matches)
+        return "Found matching applications:\n" + "\n".join(f"- {app}" for app in matches)
     
-    return f"Ошибка: Приложение '{approximate_name}' не найдено среди установленных программ."
+    return f"Error: Application '{approximate_name}' was not found among installed software."
 
 
 def _get_classic_app_paths():
