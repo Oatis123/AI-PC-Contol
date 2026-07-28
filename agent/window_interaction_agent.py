@@ -5,7 +5,7 @@ from langgraph.graph import StateGraph, END
 import operator
 import logging
 from agent.models.openrouter_models import *
-from agent.tools.pc_control_tools import interact_with_element_by_id, scrape_application
+from agent.tools.pc_control_tools import interact_with_element_by_id, scrape_application, simulate_keyboard
 from agent.tools.web_tools import search_web
 from agent.tools.useful_tools import waiting
 from agent.prompts.window_interaction_prompt import window_interaction_agent_prompt as prompt
@@ -27,6 +27,7 @@ logging.basicConfig(
 tools = [
     scrape_application, 
     interact_with_element_by_id, 
+    simulate_keyboard,
     waiting,
     search_web
 ]
@@ -43,7 +44,7 @@ class AgentState(TypedDict):
  
 async def agent_node(state):
     logging.info("--- [Window Agent] Вход в agent_node ---")
-    # 1. Заглушка для пустого контента (чтобы Xiaomi не крашился)
+    # Ensure AI message content is not empty when tool calls exist
     for msg in state["messages"]:
         if getattr(msg, "type", "") == "ai" and not getattr(msg, "content", "") and getattr(msg, "tool_calls", None):
             msg.content = "Вызываю инструменты..."

@@ -91,6 +91,81 @@ async def _execute_pc_task_background(prompt_text: str):
         )
 
 
+class TaskRequest(BaseModel):
+    prompt: str
+    async_mode: bool = False
+
+
+@app.get("/")
+async def root():
+    """Информационный эндпоинт состояния сервера Atlas AI-PC-Control."""
+    return {
+        "name": "Atlas AI-PC-Control API",
+        "status": "running",
+        "endpoints": {
+            "POST /api/execute": "Выполнить задачу на ПК (синхронно или асинхронно)",
+            "POST /run": "Прямое выполнение списка команд (legacy)",
+            "POST /tools/run-pc-agent": "Интеграционный эндпоинт Data-Sama"
+        }
+    }
+
+
+@app.post("/api/execute")
+async def execute_user_task(data: TaskRequest, background_tasks: BackgroundTasks):
+    """
+    Универсальный REST API эндпоинт для обычных пользователей.
+    
+    Принимает JSON:
+    {
+      "prompt": "Открой блокнот и напиши 'Привет'",
+      "async_mode": false
+    }
+    """
+    if not data.prompt or not data.prompt.strip():
+        return {"status": "error", "message": "Поле 'prompt' не может быть пустым."}
+
+    prompt_text = data.prompt.strip()
+
+    if data.async_mode:
+        background_tasks.add_task(_execute_pc_task_background, prompt_text)
+        return {
+            "status": "queued",
+            "message": "Задача принята и выполняется в фоновом режиме.",
+            "prompt": prompt_text
+        }
+
+    try:
+        logging.info(f"--- [API TASK START] Synchronous processing: '{prompt_text}' ---")
+        messages = [HumanMessage(content=prompt_text)]
+        agent_response_messages = await request_to_agent_async(messages)
+        
+        final_content = ""
+        if agent_response_messages:
+            from langchain_core.messages import AIMessage
+            for msg in reversed(agent_response_messages):
+                if isinstance(msg, AIMessage) and msg.content and msg.content != "Вызываю инструменты...":
+                    final_content = msg.content
+                    break
+            if not final_content and agent_response_messages:
+                final_content = str(agent_response_messages[-1].content)
+
+        if not final_content:
+            final_content = "Задача успешно выполнена."
+
+        return {
+            "status": "success",
+            "prompt": prompt_text,
+            "response": final_content
+        }
+    except Exception as e:
+        logging.error(f"Error executing API task '{prompt_text}': {e}", exc_info=True)
+        return {
+            "status": "error",
+            "prompt": prompt_text,
+            "error": str(e)
+        }
+
+
 @app.post("/tools/run-pc-agent")
 async def run_pc_agent(payload: dict, background_tasks: BackgroundTasks):
     """

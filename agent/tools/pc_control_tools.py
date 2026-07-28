@@ -5,6 +5,7 @@ import psutil
 import time
 import ctypes
 import logging
+import re
 from typing import List, Dict, Any, Union, Optional
 
 from langchain_core.tools import tool
@@ -20,9 +21,29 @@ from pywinauto.findwindows import ElementNotFoundError
 from PIL import ImageGrab
 
 import pyautogui
+import pyperclip
 
 ELEMENTS_CACHE = {}
 CURRENT_ID = 0
+
+def _type_unicode_text(text: str):
+    """Надежный способ ввода юникодного текста (включая кириллицу) через буфер обмена."""
+    
+    if '\n' in text:
+        lines = text.split('\n')
+        for i, line in enumerate(lines):
+            if line:
+                pyperclip.copy(line)
+                time.sleep(0.1) # Ждем пока Windows положит текст в буфер
+                pyautogui.hotkey('shift', 'insert') # Вставляет независимо от раскладки
+                time.sleep(0.05)
+            if i < len(lines) - 1:
+                pyautogui.press('enter')
+    else:
+        pyperclip.copy(text)
+        time.sleep(0.1) # Ждем пока Windows положит текст в буфер
+        pyautogui.hotkey('shift', 'insert') # Вставляет независимо от раскладки
+        time.sleep(0.05)
 
 def _get_installed_software():
     global _SOFTWARE_CACHE, _SOFTWARE_CACHE_TIME, _MODERN_APPS_CACHE
@@ -95,9 +116,11 @@ def find_application_name(approximate_name: str) -> str:
     
     search_term = approximate_name.lower()
     
-    for app_name in all_apps:
-        if search_term in app_name.lower():
-            return app_name
+    # Собираем все частичные совпадения
+    matches = [app for app in all_apps if search_term in app.lower()]
+    
+    if matches:
+        return "Найдены следующие приложения:\n" + "\n".join(f"- {app}" for app in matches)
     
     return f"Ошибка: Приложение '{approximate_name}' не найдено среди установленных программ."
 
@@ -226,6 +249,15 @@ def get_open_windows():
     
     return "\n".join(window_titles)
 
+def _get_window_by_name(name: str):
+    """Вспомогательная функция для получения объекта окна по имени через pywinauto."""
+    app_name = name.split(" - ")[-1].strip() if " - " in name else name.strip()
+    safe_name = re.escape(app_name)
+    main_win_spec = Desktop(backend="win32").window(title_re=f".*{safe_name}.*", found_index=0)
+    if not main_win_spec.exists(timeout=0.5):
+        raise ElementNotFoundError(f"Окно '{name}' не найдено.")
+    return main_win_spec.wrapper_object()
+
 @tool
 def scrape_application(name: str) -> str:
     """
@@ -245,10 +277,11 @@ def scrape_application(name: str) -> str:
 
     try:
         app_name = name.split(" - ")[-1].strip() if " - " in name else name.strip()
+        safe_name = re.escape(app_name)
         
-        main_win_spec = Desktop(backend="win32").window(title_re=f".*{app_name}.*", found_index=0)
+        main_win_spec = Desktop(backend="win32").window(title_re=f".*{safe_name}.*", found_index=0)
         if not main_win_spec.exists(timeout=0.5):
-            main_win_spec = Desktop(backend="uia").window(title_re=f".*{app_name}.*", found_index=0)
+            main_win_spec = Desktop(backend="uia").window(title_re=f".*{safe_name}.*", found_index=0)
             if not main_win_spec.exists(timeout=0.5):
                 elapsed = time.time() - start_time
                 logging.info(f"❌ [OmniParser] Окно '{name}' не найдено ({elapsed:.4f} сек).")
@@ -350,6 +383,7 @@ def interact_with_element_by_id(
             - В случае ошибки — строка с описанием ошибки (например, "Ошибка: Элемент с координатами ... не найден.").
     """
     try:
+        main_win = _get_window_by_name(name)
         if element_id not in ELEMENTS_CACHE and 'zoom' not in action and action not in ["type_text_blind", "press_enter"]:
             return f"Ошибка: Элемент с id {element_id} не найден в кэше."
 
@@ -376,29 +410,13 @@ def interact_with_element_by_id(
             pyautogui.click(center_x, center_y)
             time.sleep(0.15)
 
-            # 2. Определяем нужный язык и переключаем раскладку активного окна
-            import ctypes
-            
-            # Проверяем, есть ли хоть одна русская буква
-            has_cyrillic = any('а' <= c <= 'я' or 'А' <= c <= 'Я' or c in 'ёЁ' for c in text_to_set)
-            # 0x0419 = Русский, 0x0409 = Английский (США)
-            hkl = 0x0419 if has_cyrillic else 0x0409
-            
-            # Берём хэндл окна, которое сейчас в фокусе (после нашего клика)
-            hwnd = ctypes.windll.user32.GetForegroundWindow()
-            # Посылаем системное сообщение WM_INPUTLANGCHANGEREQUEST (0x0050)
-            ctypes.windll.user32.PostMessageW(hwnd, 0x0050, 0, hkl)
-            
-            # ВАЖНО: Винда меняет раскладку асинхронно, даём ей 200мс на подумать
-            time.sleep(0.2)
-
-            # 3. Стираем старое содержимое
+            # 2. Стираем старое содержимое
             pyautogui.hotkey('ctrl', 'a')
             pyautogui.press('delete')
             time.sleep(0.1)
 
-            # 4. Вводим текст — теперь pyautogui попадет по нужным скан-кодам
-            pyautogui.write(text_to_set, interval=0.01)
+            # 3. Вводим текст через буфер обмена для поддержки любых языков
+            _type_unicode_text(text_to_set)
             
             return f"Действие '{action}' успешно выполнено."
             
@@ -407,7 +425,7 @@ def interact_with_element_by_id(
                 return "Ошибка: нужен text_to_set."
 
             main_win.set_focus()
-            pyautogui.write(text_to_set, interval=0.01)
+            _type_unicode_text(text_to_set)
             
         elif action == 'press_enter':
             # Вместо клика по элементу, жестко активируем само окно
@@ -448,6 +466,45 @@ def interact_with_element_by_id(
     except Exception as e:
         return f"Произошла непредвиденная ошибка: {type(e).__name__}: {e}"
     
+
+@tool
+def simulate_keyboard(name: str, keys: str) -> str:
+    """
+    Симулирует нажатие клавиш клавиатуры или ввод текста в указанном окне.
+    Окно сначала выводится на передний план.
+
+    Args:
+        name (str): Часть заголовка окна, в которое нужно отправить нажатия.
+        keys (str): Строка для ввода или специальная клавиша/комбинация. 
+                    Примеры: 'enter', 'tab', 'esc', 'ctrl+c', 'alt+tab', 'hello world'.
+                    Поддерживаются имена клавиш из библиотеки pyautogui.
+    """
+    try:
+        main_win = _get_window_by_name(name)
+        main_win.set_focus()
+        time.sleep(0.2)  # Даем окну время на получение фокуса
+
+        # Проверяем, является ли это горячей клавишей (содержит +)
+        if '+' in keys and len(keys) < 15:
+            # Например, 'ctrl+c' -> ['ctrl', 'c']
+            keys_list = [k.strip().lower() for k in keys.split('+')]
+            pyautogui.hotkey(*keys_list)
+            return f"Выполнено нажатие комбинации клавиш: {keys}"
+        
+        # Проверяем, является ли это одиночной специальной клавишей
+        elif keys.lower() in pyautogui.KEYBOARD_KEYS:
+            pyautogui.press(keys.lower())
+            return f"Выполнено нажатие специальной клавиши: {keys}"
+        
+        # Иначе просто вводим текст
+        else:
+            _type_unicode_text(keys)
+            return f"Выполнен ввод текста: {keys}"
+
+    except ElementNotFoundError:
+        return f"Ошибка: Окно с именем '{name}' не найдено."
+    except Exception as e:
+        return f"Произошла непредвиденная ошибка: {e}"
 
 @tool
 def execute_bash_command(command: str) -> str:
