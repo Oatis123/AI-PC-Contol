@@ -160,11 +160,9 @@ This project is licensed under the MIT License.
 <br/>
 
 <p align="center">
-  <code>  /\_/\   </code><br/>
-  <code> ( o.o )  </code><br/>
-  <code>  > ^ <   </code>
-</p>
-
-<p align="center">
+  &nbsp;&nbsp;/&#92;_/\&nbsp;&nbsp;<br/>
+  &nbsp;( o.o )&nbsp;<br/>
+  &nbsp;&nbsp;&gt;&nbsp;^&nbsp;&lt;&nbsp;&nbsp;<br/>
+  <br/>
   <b>Made with ❤️</b>
 </p>
