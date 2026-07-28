@@ -159,14 +159,12 @@ This project is licensed under the MIT License.
 
 <br/>
 
-<div align="center">
+<p align="center">
+  <code>  /\_/\   </code><br/>
+  <code> ( o.o )  </code><br/>
+  <code>  > ^ <   </code>
+</p>
 
-```text
-  /\_/\  
- ( o.o ) 
-  > ^ <  Atlas AI
-```
-
-**Made with ❤️**
-
-</div>
+<p align="center">
+  <b>Made with ❤️</b>
+</p>
