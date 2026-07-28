@@ -156,3 +156,17 @@ AI-PC-Contol/
 
 ## 📝 License
 This project is licensed under the MIT License.
+
+<br/>
+
+<div align="center">
+
+```text
+  /\_/\  
+ ( o.o ) 
+  > ^ <  Atlas AI
+```
+
+**Made with ❤️**
+
+</div>
