@@ -86,7 +86,6 @@ pip install -r requirements.txt
 Create a `.env` file in the project root directory:
 ```env
 OPENROUTER_API_KEY=your_openrouter_api_key_here
-DATASAMA_WS_URL=wss://your-datasama-endpoint.com/ws  # Optional
 ```
 
 ### 4. Download OmniParser Model Weights
@@ -146,7 +145,7 @@ AI-PC-Contol/
 ├── gui/                           # Visual overlay components (overlay.py)
 ├── scripts/                       # Model weight download scripts
 ├── utils/                         # Helper utilities
-├── datasama_client.py             # WebSocket client for Data-Sama integration
+├── datasama_client.py             # WebSocket client for external platform integration
 ├── main.py                        # Voice GUI app with Vosk ASR & Silero TTS
 ├── server.py                      # FastAPI server (REST API + WS)
 ├── requirements.txt               # Python package dependencies
