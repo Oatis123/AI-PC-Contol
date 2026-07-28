@@ -18,8 +18,8 @@ The system combines high-speed terminal execution (PowerShell/CMD) with neural c
   - Immune to system keyboard layout switching and Windows 11 UWP application constraints.
 - 🔌 **Flexible REST API & Background Task Queue:**
   - Built-in **FastAPI** server supporting both synchronous HTTP requests and background asynchronous task execution.
-- 🌐 **Cloud Integration (Data-Sama):**
-  - Bi-directional WebSocket client for remote PC management via the **Data-Sama** platform.
+- 🌐 **Extensible WebSocket Protocol:**
+  - Bi-directional WebSocket client support for remote control by external AI companions or custom platforms (e.g. Data-Sama integration).
 - 🎙️ **Local Voice Interface (GUI Mode):**
   - Autonomous speech recognition (**Vosk ASR**) and local speech synthesis (**Silero TTS / gTTS**) for real-time voice control.
 
@@ -35,8 +35,8 @@ The system combines high-speed terminal execution (PowerShell/CMD) with neural c
                        ┌─────────────────────┴─────────────────────┐
                        ▼                                           ▼
          ┌───────────────────────────┐               ┌───────────────────────────┐
-         │     REST API (FastAPI)    │               │    Local Voice GUI (main) │
-         │  server.py / Data-Sama    │               │  Vosk ASR + Silero TTS    │
+         │     REST API & WebSockets │               │    Local Voice GUI (main) │
+         │   server.py / FastAPI     │               │  Vosk ASR + Silero TTS    │
          └─────────────┬─────────────┘               └─────────────┬─────────────┘
                        │                                           │
                        └─────────────────────┬─────────────────────┘
