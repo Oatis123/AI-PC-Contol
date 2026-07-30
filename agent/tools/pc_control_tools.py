@@ -509,17 +509,17 @@ def simulate_keyboard(name: str, keys: str) -> str:
 @tool
 def execute_bash_command(command: str) -> str:
     """
-    Выполняет команду в терминале (shell) и возвращает ее вывод. Запрещены разрушительные команды.
+    Executes a shell command in PowerShell and returns its output.
 
     Args:
-        command (str): Команда для выполнения.
+        command (str): PowerShell or shell command to execute.
     """
     timeout_seconds = 10
     
     try:
+        full_cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
         result = subprocess.run(
-            command, 
-            shell=True,
+            full_cmd, 
             capture_output=True,
             text=True,
             timeout=timeout_seconds,

@@ -3,7 +3,7 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, BaseMessage
 
 from agent.agent import request_to_agent_async, request_to_agent_sync
 from datasama_client import DataSamaClient
@@ -47,6 +47,30 @@ class CommandRequest(BaseModel):
     commands: list[str]
 
 
+# Sliding session history window (up to 15 user-agent request/response pairs)
+MAX_HISTORY_TURNS = 15
+SESSION_HISTORY: list[BaseMessage] = []
+
+
+def get_session_messages(prompt_text: str) -> list[BaseMessage]:
+    """Builds full message list combining past session history and the new user prompt."""
+    return list(SESSION_HISTORY) + [HumanMessage(content=prompt_text)]
+
+
+def record_session_turn(prompt_text: str, response_text: str):
+    """Saves a completed user prompt and agent response pair into the sliding session memory."""
+    global SESSION_HISTORY
+    from langchain_core.messages import AIMessage
+    SESSION_HISTORY.append(HumanMessage(content=prompt_text))
+    SESSION_HISTORY.append(AIMessage(content=response_text))
+    
+    # Keep only the last N turns (each turn = 1 HumanMessage + 1 AIMessage)
+    max_messages = MAX_HISTORY_TURNS * 2
+    if len(SESSION_HISTORY) > max_messages:
+        SESSION_HISTORY = SESSION_HISTORY[-max_messages:]
+    logging.info(f"Updated session history (Current size: {len(SESSION_HISTORY)} messages / {len(SESSION_HISTORY)//2} turns)")
+
+
 async def _execute_pc_task_background(prompt_text: str):
     """Background task running the LangGraph agent and sending WebSocket updates."""
     try:
@@ -55,8 +79,8 @@ async def _execute_pc_task_background(prompt_text: str):
         # 1. Send single background state update over WS
         await datasama_client.send_background_update(f"Executing task: {prompt_text}")
 
-        # 2. Execute local PC control agent
-        messages = [HumanMessage(content=prompt_text)]
+        # 2. Execute local PC control agent with session memory
+        messages = get_session_messages(prompt_text)
         agent_response_messages = await request_to_agent_async(messages)
 
         final_content = ""
@@ -72,6 +96,9 @@ async def _execute_pc_task_background(prompt_text: str):
 
         if not final_content:
             final_content = "Task completed (no text response from agent)."
+
+        # Record this turn into session history
+        record_session_turn(prompt_text, final_content)
 
         logging.info(f"--- [TASK FINISHED] Sending tool_result to Data-Sama: '{final_content}' ---")
 
@@ -102,12 +129,24 @@ async def root():
     return {
         "name": "Atlas AI-PC-Control API",
         "status": "running",
+        "session_history_turns": len(SESSION_HISTORY) // 2,
         "endpoints": {
             "POST /api/execute": "Execute PC task (synchronously or asynchronously)",
+            "POST /api/clear-history": "Clear session message history",
             "POST /run": "Direct command list execution (legacy)",
             "POST /tools/run-pc-agent": "Data-Sama integration endpoint"
         }
     }
+
+
+@app.post("/api/clear-history")
+async def clear_history():
+    """Clears the session message history."""
+    global SESSION_HISTORY
+    count = len(SESSION_HISTORY) // 2
+    SESSION_HISTORY.clear()
+    logging.info("Session history cleared by user API request.")
+    return {"status": "success", "message": f"Cleared {count} history turns."}
 
 
 @app.post("/api/execute")
@@ -136,7 +175,7 @@ async def execute_user_task(data: TaskRequest, background_tasks: BackgroundTasks
 
     try:
         logging.info(f"--- [API TASK START] Synchronous processing: '{prompt_text}' ---")
-        messages = [HumanMessage(content=prompt_text)]
+        messages = get_session_messages(prompt_text)
         agent_response_messages = await request_to_agent_async(messages)
         
         final_content = ""
@@ -151,6 +190,9 @@ async def execute_user_task(data: TaskRequest, background_tasks: BackgroundTasks
 
         if not final_content:
             final_content = "Task executed successfully."
+
+        # Record this turn into session history
+        record_session_turn(prompt_text, final_content)
 
         return {
             "status": "success",
